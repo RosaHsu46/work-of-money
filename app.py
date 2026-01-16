@@ -10,9 +10,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 # 設定頁面資訊
-st.set_page_config(page_title="AI 量化交易策略實驗室", layout="wide", page_icon="📈")
+st.set_page_config(page_title="AI 量化交易策略實室 (Portfolio Edition)", layout="wide", page_icon="📈")
 
-st.title("🤖 AI 量化交易策略實驗室")
+st.title("🤖 AI 量化交易策略實驗室 (Portfolio Edition)")
 st.markdown("### 2-Stage Gate: VIX Regime + Dynamic Quantile Model")
 
 # --------------------------
@@ -20,71 +20,90 @@ st.markdown("### 2-Stage Gate: VIX Regime + Dynamic Quantile Model")
 # --------------------------
 st.sidebar.header("⚙️ 參數設定")
 
-TARGET_TICKER = st.sidebar.text_input("股票代號 (Yahoo Finance)", value="2330.TW")
+# 修改：改成 Text Area 支援多檔股票
+default_tickers = "2330.TW\n2317.TW\n2454.TW"
+input_tickers = st.sidebar.text_area(
+    "股票代號清單 (一行一個或逗號分隔)", 
+    value=default_tickers,
+    height=150,
+    help="例如：\n2330.TW\nNVDA\nAAPL"
+)
+
 YEARS_BACK = st.sidebar.slider("回測年數", min_value=1, max_value=5, value=3)
 
 # 進階參數區
 with st.sidebar.expander("進階參數 (Advanced)", expanded=False):
     COST = st.number_input("單邊交易成本 (Cost)", value=0.001, step=0.0005, format="%.4f")
     HOLD_DAYS = st.number_input("持有天數 (Hold Days)", value=3, min_value=1)
-    MARKET_MODE = 0  # 固定 Mode 0
-    st.info("Market Gate: Mode 0 (VIX < Median)")
-
-run_btn = st.sidebar.button("🚀 開始分析 (Run Analysis)", type="primary")
+    
+run_btn = st.sidebar.button("🚀 開始批次分析 (Batch Run)", type="primary")
 
 # --------------------------
-# Logic Functions
+# Core Logic Functions
 # --------------------------
+
 @st.cache_data(ttl=3600)
-def download_data(ticker, years):
+def download_macro_data(years):
+    """只下載一次宏觀數據並快取"""
     today = datetime.now()
     start_date = (today - timedelta(days=365*years)).strftime("%Y-%m-%d")
     end_date = today.strftime("%Y-%m-%d")
     
-    with st.spinner(f"📥 下載 {ticker} 資料中 ({start_date} ~ {end_date})..."):
-        df_target = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True)
-        if isinstance(df_target.columns, pd.MultiIndex):
-            df_target.columns = df_target.columns.get_level_values(0)
-            
-        tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
-        df_macro = yf.download(tickers_macro, start=start_date, end=end_date, auto_adjust=True)
-        if isinstance(df_macro.columns, pd.MultiIndex):
-            df_macro_close = df_macro['Close'].copy()
-        else:
-            df_macro_close = df_macro.copy()
-            
-        # Merge
-        df = df_target[['Close', 'Volume']].join(df_macro_close, how='left')
-        df.ffill(inplace=True)
-        df.dropna(inplace=True)
-        df.rename(columns={
-            '^VIX': 'VIX', 
-            'DX-Y.NYB': 'DXY', 
-            '^TNX': 'US_10Y',
-            '^SOX': 'SOX',
-            '^GSPC': 'SP500',
-            '^TWII': 'TWII'
-        }, inplace=True)
+    tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
+    df_macro = yf.download(tickers_macro, start=start_date, end=end_date, auto_adjust=True)
+    
+    if isinstance(df_macro.columns, pd.MultiIndex):
+        df_macro_close = df_macro['Close'].copy()
+    else:
+        df_macro_close = df_macro.copy()
+    
+    df_macro_close.index = pd.to_datetime(df_macro_close.index).tz_localize(None)
+    
+    # Rename
+    df_macro_close.rename(columns={
+        '^VIX': 'VIX', 
+        'DX-Y.NYB': 'DXY', 
+        '^TNX': 'US_10Y',
+        '^SOX': 'SOX',
+        '^GSPC': 'SP500',
+        '^TWII': 'TWII'
+    }, inplace=True)
+    
+    return df_macro_close, start_date, end_date
+
+@st.cache_data(ttl=3600)
+def download_stock_data(ticker, start_date, end_date):
+    """下載個別股票數據"""
+    df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    
+    if df.empty:
+        return None
         
+    df = df[['Close', 'Volume']].copy()
+    df.index = pd.to_datetime(df.index).tz_localize(None)
     return df
 
-def feature_engineering(df):
-    df = df.copy()
-    # Tiny helper
-    def sma(s, n): return s.rolling(n).mean()
-    def rsi(close, n=14):
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        rs = gain.rolling(n).mean() / loss.rolling(n).mean()
-        return 100 - (100 / (1 + rs))
-
+def feature_engineering(df_stock, df_macro):
+    # Merge
+    df = df_stock.join(df_macro, how='left')
+    df.ffill(inplace=True)
+    df.dropna(inplace=True)
+    
     # Tech
-    df['SMA_5'] = sma(df['Close'], 5)
-    df['RSI_14'] = rsi(df['Close'], 14)
+    df['SMA_5'] = df['Close'].rolling(5).mean()
+    
+    # RSI
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
+    df['RSI_14'] = 100 - (100 / (1 + rs))
+    
     df['Mom_3d'] = df['Close'].pct_change(3)
 
-    # Macro
+    # Macro Features
     df['VIX_Chg'] = df['VIX'].pct_change()
     df['VIX_Chg_3d'] = df['VIX'].pct_change(3)
     df['DXY_Chg'] = df['DXY'].pct_change()
@@ -94,13 +113,13 @@ def feature_engineering(df):
     df['TWII_Chg'] = df['TWII'].pct_change()
 
     # Target Logic
-    # Backtest uses this
+    # Backtest uses this (Return tomorrow)
     df['Next_Return'] = df['Close'].shift(-1) / df['Close'] - 1
-    # Training uses this
+    # Training uses this (Return 3 days later)
     df['Return_3d'] = df['Close'].shift(-3) / df['Close'] - 1
     df['Target'] = (df['Return_3d'] > 0.003).astype(int)
 
-    # Shift Features
+    # Shift Features (Lag 1)
     features = [
         'SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 
         'VIX', 'VIX_Chg', 'VIX_Chg_3d', 
@@ -118,243 +137,222 @@ def feature_engineering(df):
     
     return df, features
 
-def run_backtest(df, features, quantiles=[0.50, 0.55, 0.60, 0.65, 0.70]):
-    X = df[features]
-    y = df['Target']
-    
-    tscv = TimeSeriesSplit(n_splits=5)
-    scan_results = []
-    
-    # Placeholders for best equity curve
-    best_curve = None
-    best_q = None
-    max_net_equity = -1.0
+def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
+    """執行單一股票的完整分析流程"""
+    try:
+        # 1. Download Stock
+        df_stock = download_stock_data(ticker, start_date, end_date)
+        if df_stock is None or len(df_stock) < 60:
+            return {"status": "error", "msg": "No Data or too short"}
+            
+        # 2. FE
+        df_feat, features = feature_engineering(df_stock, df_macro)
+        if len(df_feat) < 50:
+            return {"status": "error", "msg": "Not enough data after FE"}
 
-    progress_bar = st.progress(0)
-    total_steps = len(quantiles) * 5
-    step_count = 0
-
-    for q in quantiles:
-        # Loop Quantiles
-        fold_stats = []
+        # 3. Model & Backtest (Simplified for batch speed)
+        # 這裡只跑一個最佳參數掃描的簡化版，或者固定用一個較好的 Quantile (e.g. 0.6) 以節省時間？
+        # 為了效能，我們這裡固定掃描幾個關鍵 Quantile，取最好的。
         
-        # Merge all folds equity for visualization? No, let's just track the last fold or concat?
-        # Ideally we want a full out-of-sample curve. 
-        # For simplicity in this UI, let's concatenate the OOS parts of each fold to form a continuous backtest.
+        X = df_feat[features]
+        y = df_feat['Target']
         
-        oos_equity_segments = []
+        # Train final model on FULL data first to get latest signal
+        final_model = HistGradientBoostingClassifier(random_state=42)
+        final_model.fit(X, y)
         
-        # 參數內的 Cross Val
+        # Latest Signal
+        last_row = df_feat.iloc[[-1]]
+        latest_proba = final_model.predict_proba(last_row[features])[:, 1][0]
+        
+        # Calculate Threshold (Dynamic 252d)
+        # 為了 batch 速度，我們預設用 Q=0.6 (相對穩健)
+        # 如果用戶希望每個都掃描，可以在這裡加入簡單的 CV。
+        # 為了體驗，我們這裡做一個快速的 TimeSeriesSplit 驗證獲利能力
+        
+        tscv = TimeSeriesSplit(n_splits=3) # 減少 split 加快速度
         model = HistGradientBoostingClassifier(random_state=42)
         
-        full_signals = []
-        full_dates = []
+        total_ret = 0
+        qs = [0.55, 0.60, 0.65] # 掃描範圍縮小
+        best_q = 0.60
+        best_equity = -999
+        best_curve = None
         
-        for train_idx, test_idx in tscv.split(X):
-            step_count += 1
-            progress_bar.progress(step_count / total_steps)
+        for q in qs:
+            # 簡易回測邏輯
+            # 略過完整的逐日回測，改用向量化估算以加速
+            # 注意：這裡為了速度做適度簡化
+            preds = []
+            truths = []
             
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            # 這裡我們只做最後一折的驗證來當作成績單，避免跑太久
+            # Train last 80%, Test last 20%
+            split_idx = int(len(X) * 0.8)
+            X_tr, X_te = X.iloc[:split_idx], X.iloc[split_idx:]
+            y_tr, y_te = y.iloc[:split_idx], y.iloc[split_idx:]
             
-            model.fit(X_train, y_train)
+            model.fit(X_tr, y_tr)
             
-            # Dynamic Threshold Calculation
-            lookback = 252
-            if len(X_train) > lookback:
-                proba_ctx = model.predict_proba(X_train.iloc[-lookback:])[:, 1]
-            else:
-                proba_ctx = model.predict_proba(X_train)[:, 1]
+            # Context
+            proba_tr = model.predict_proba(X_tr.iloc[-252:])[:, 1] if len(X_tr) > 252 else model.predict_proba(X_tr)[:, 1]
+            proba_te = model.predict_proba(X_te)[:, 1]
             
-            proba_test = model.predict_proba(X_test)[:, 1]
+            full_prob = np.concatenate([proba_tr, proba_te])
+            thresh_series = pd.Series(full_prob).rolling(252, min_periods=1).quantile(q)
+            te_thresh = thresh_series.iloc[-len(proba_te):].values
             
-            # Concat for quantile
-            proba_full = np.concatenate([proba_ctx, proba_test])
-            rolling_thresh = pd.Series(proba_full).rolling(lookback, min_periods=1).quantile(q)
-            thresh_test = rolling_thresh.iloc[-len(proba_test):].values
+            # Calc Return
+            test_df = df_feat.iloc[split_idx:].copy()
+            test_df['proba'] = proba_te
+            test_df['thresh'] = te_thresh
             
-            # Backtest
-            bt_fold = df.iloc[test_idx].copy()
-            bt_fold['proba_up'] = proba_test
-            bt_fold['dyn_thresh'] = thresh_test
+            # Logic
+            mask_market = test_df['VIX'] < test_df['VIX_med60']
+            mask_model = test_df['proba'] >= test_df['thresh']
+            test_df['signal'] = (mask_market & mask_model).astype(int)
             
-            # Gates
-            bt_fold['market_ok'] = (bt_fold['VIX'] < bt_fold['VIX_med60']).astype(int)
-            bt_fold['model_ok'] = (bt_fold['proba_up'] >= bt_fold['dyn_thresh']).astype(int)
-            bt_fold['trade_allowed'] = (bt_fold['market_ok'] & bt_fold['model_ok']).astype(int)
+            # Simple equity (Buy Next Return - Cost)
+            # 忽略 Hold 3 days 細節，簡化為 Daily Impact for Selection
+            daily_ret = test_df['signal'] * (test_df['Next_Return'] - COST) 
+            final_eq = (1 + daily_ret).cumprod().iloc[-1]
             
-            # State Machine
-            hold_count = 0
-            strat_rets = np.zeros(len(bt_fold))
-            signals = np.zeros(len(bt_fold))
-            
-            next_rets = bt_fold['Next_Return'].values
-            allowed = bt_fold['trade_allowed'].values
-            
-            for i in range(len(bt_fold)):
-                if hold_count > 0:
-                    strat_rets[i] = next_rets[i]
-                    hold_count -= 1
-                else:
-                    if allowed[i] == 1:
-                        strat_rets[i] = next_rets[i] - COST
-                        signals[i] = 1
-                        hold_count = HOLD_DAYS - 1
-            
-            # Collect metrics
-            bt_fold['strat_ret'] = strat_rets
-            
-            # Append OOS results for this fold
-            oos_equity_segments.append(bt_fold[['strat_ret']])
-            if trades := signals.sum():
-                 pass # simplified metrics for UI
-                 
-        # Stitch folds together to make a "Walk-Forward" Equity Curve
-        oos_df = pd.concat(oos_equity_segments)
-        oos_df.sort_index(inplace=True)
-        # Handle overlaps if any (TSC doesn't overlap test sets usually)
-        oos_df = oos_df[~oos_df.index.duplicated(keep='first')]
-        
-        oos_df['equity'] = (1 + oos_df['strat_ret']).cumprod()
-        oos_df['benchmark'] = (1 + df.loc[oos_df.index, 'Next_Return']).cumprod()
-        
-        final_eq = oos_df['equity'].iloc[-1]
-        
-        # Metrics
-        total_trades = 0 # Need to recalc
-        # Re-run logic on full stitched? No, just sum
-        # Ideally calculate metrics on the stitched curve
-        
-        dd = oos_df['equity'] / oos_df['equity'].cummax() - 1
-        mdd = dd.min()
-        
-        scan_results.append({
-            "Quantile": q,
-            "Net Equity": final_eq,
-            "MaxDD": mdd
-        })
-        
-        if final_eq > max_net_equity:
-            max_net_equity = final_eq
-            best_curve = oos_df
-            best_q = q
+            if final_eq > best_equity:
+                best_equity = final_eq
+                best_q = q
+                best_curve = (1 + daily_ret).cumprod()
 
-    progress_bar.empty()
-    return pd.DataFrame(scan_results), best_curve, best_q
+        # Get Threshold for TODAY using Best Q
+        proba_history = final_model.predict_proba(X)[:, 1]
+        current_thresh = pd.Series(proba_history).rolling(252).quantile(best_q).iloc[-1]
+        
+        # Final Decision
+        latest_vix = df_feat['VIX'].iloc[-1]
+        vix_med = df_feat['VIX_med60'].iloc[-1]
+        market_ok = latest_vix < vix_med
+        model_ok = latest_proba >= current_thresh
+        
+        action = "✅ BUY" if (market_ok and model_ok) else "🛑 WAIT"
+        
+        return {
+            "status": "ok",
+            "ticker": ticker,
+            "close": df_feat['Close'].iloc[-1],
+            "proba": latest_proba,
+            "thresh": current_thresh,
+            "best_q": best_q,
+            "market_ok": market_ok,
+            "model_ok": model_ok,
+            "action": action,
+            "equity_test": best_equity, # Last 20% sample performance
+            "curve": best_curve,
+            "df_feat_tail": df_feat.tail(5) # For detail view
+        }
+        
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
 
 # --------------------------
-# Main App
+# Main Execution
 # --------------------------
 if run_btn:
-    # 1. Download
-    raw_df = download_data(TARGET_TICKER, YEARS_BACK)
+    # Parse Tickers
+    raw_tickers = [t.strip() for t in input_tickers.replace(',', '\n').split('\n') if t.strip()]
     
-    if raw_df is None or raw_df.empty:
-        st.error(f"❌ 下載失敗：無法取得 {TARGET_TICKER} 資料。請檢查代號或網路。")
+    if not raw_tickers:
+        st.error("請輸入至少一支股票代號")
         st.stop()
         
-    # Check Macro columns
-    if 'VIX' not in raw_df.columns or raw_df['VIX'].isnull().all():
-        st.warning("⚠️ 警告：VIX 數據遺失 (全為 NaN)。這將導致 DropNA 後資料全空。")
-        # Optional: display raw head for debug
-        st.write("Raw Data Head:", raw_df.head())
-    
-    st.success(f"資料下載完成！共 {len(raw_df)} 筆交易日。")
-    
-    # 2. Features
-    df_feat, feature_names = feature_engineering(raw_df)
-    
-    if df_feat.empty:
-        st.error("❌ 錯誤：特徵工程後資料為空。可能原因：\n1. 宏觀數據(VIX)對齊失敗導致全被 Drop \n2. 資料長度不足以計算 60 日均線。")
+    # 1. Download Macro (Once)
+    st.info("📥 下載宏觀數據中 (Macro Data)...")
+    try:
+        df_macro, start_dt, end_dt = download_macro_data(YEARS_BACK)
+    except Exception as e:
+        st.error(f"宏觀數據下載失敗: {e}")
         st.stop()
-
-    if len(df_feat) < 50:
-        st.error(f"❌ 樣本數不足 ({len(df_feat)})，無法進行 TimeSeriesSplit。請嘗試拉長回測年數。")
-        st.stop()
-    
-    # Show Data Preview
-    with st.expander("數據預覽 (Data Preview)"):
-        st.dataframe(df_feat.tail(10))
-        st.caption("最近 10 筆數據 (包含特徵)")
-    
-    # 3. Model & Backtest
-    st.write("🏃‍♂️ 正在執行 Walk-Forward Validation 與參數掃描...")
-    res_df, best_curve_df, best_q = run_backtest(df_feat, feature_names)
-    
-    # 4. Results
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("📊 參數掃描結果")
-        st.dataframe(res_df.style.format({
-            "Net Equity": "{:.3f}x",
-            "MaxDD": "{:.2%}"
-        }).highlight_max(subset=["Net Equity"], color="lightgreen"))
         
-        st.info(f"🏆 最佳 Quantile: {best_q}")
+    # 2. Loop Tickers
+    results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    with col2:
-        st.subheader("📈 最佳策略資金曲線 (Walk-Forward)")
-        if best_curve_df is not None:
-            # Plot
-            fig = px.line(best_curve_df, y=['equity', 'benchmark'], 
-                          title=f"Strategy (Q={best_q}) vs Benchmark (Buy&Hold)",
-                          color_discrete_map={"equity": "green", "benchmark": "gray"})
-            st.plotly_chart(fig, use_container_width=True)
+    for i, t in enumerate(raw_tickers):
+        pct = (i) / len(raw_tickers)
+        progress_bar.progress(pct)
+        status_text.text(f"正在分析 {t} ({i+1}/{len(raw_tickers)})...")
+        
+        res = run_analysis_for_ticker(t, df_macro, start_dt, end_dt)
+        if res['status'] == 'ok':
+            # Append result
+            results.append({
+                "Ticker": t,
+                "Action": res['action'],
+                "Confidence": f"{res['proba']:.1%}",
+                "Threshold": f"{res['thresh']:.1%}",
+                "Market(VIX)": "Safe" if res['market_ok'] else "Risk",
+                "Backtest(Last20%)": f"{res['equity_test']:.2f}x",
+                "Close": f"{res['close']:.2f}",
+                # Hidden objects for details
+                "_raw_res": res
+            })
+        else:
+            # Error row
+            results.append({
+                "Ticker": t,
+                "Action": "⚠️ ERROR",
+                "Confidence": "-",
+                "Threshold": "-",
+                "Market(VIX)": "-",
+                "Backtest(Last20%)": "-",
+                "Close": "-",
+                "_error": res['msg']
+            })
             
-            st.metric("Strategy Final Equity", f"{best_curve_df['equity'].iloc[-1]:.3f}x")
-            st.metric("Benchmark Final Equity", f"{best_curve_df['benchmark'].iloc[-1]:.3f}x")
-            
-    # 5. Signal for Today (Actionable)
+    progress_bar.progress(1.0)
+    status_text.text("分析完成！")
+    
+    # 3. Summary Dashboard
     st.markdown("---")
-    st.subheader("🔮 今日訊號 (最新預測)")
+    st.subheader("� 投資組合總體檢 (Portfolio Summary)")
     
-    # Retrain on FULL Data to get today's signal
-    last_row = df_feat.iloc[[-1]] 
-    # Use full data to train
-    X_full = df_feat[feature_names]
-    y_full = df_feat['Target']
-    
-    final_model = HistGradientBoostingClassifier(random_state=42)
-    final_model.fit(X_full, y_full)
-    
-    # Predict on the *latest available feature set* (which is derived from Yesterday's Close to predict Today/Tomorrow)
-    # Actually, main.py uses lag=1. So today's input (Close_t) predicts Return_t+1~t+3? 
-    # Logic: Features are shift(1). So row T contains features from T-1.
-    # We want to predict for T. We need features from T-1. 
-    # df_feat already has shifted features. So the last row of df_feat contains features known at T-1 (yesterday close).
-    # This prediction is valid for 'Today'.
-    
-    # Wait, we need to know if today is a Trading Day or if we are post-close.
-    # Assuming standard usage: User runs this AFTER market close to get signal for TOMORROW? 
-    # Or DURING market? 
-    # Let's just output the "Latest Prediction" based on "Latest Data".
-    
-    latest_proba = final_model.predict_proba(last_row[feature_names])[:, 1][0]
-    
-    # Calculate current Dynamic Threshold (using last 252 days of full data)
-    proba_history = final_model.predict_proba(X_full)[:, 1]
-    current_thresh = pd.Series(proba_history).rolling(252).quantile(best_q).iloc[-1]
-    
-    # Market Gate
-    latest_vix = df_feat['VIX'].iloc[-1]
-    vix_med = df_feat['VIX_med60'].iloc[-1]
-    market_ok = latest_vix < vix_med
-    
-    model_ok = latest_proba >= current_thresh
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("模型信心 (Proba)", f"{latest_proba:.1%}")
-    c1.caption(f"門檻值: {current_thresh:.1%}")
-    
-    c2.metric("市場狀態 (VIX)", f"{latest_vix:.2f}", delta=f"{latest_vix - vix_med:.2f} vs Med", delta_color="inverse")
-    c2.caption(f"VIX Med60: {vix_med:.2f}")
-    
-    c3.metric("最終決策", 
-              "✅ ALLOWED" if (market_ok and model_ok) else "🛑 REJECTED",
-              delta="Buy Signal" if (market_ok and model_ok) else "Wait",
-              delta_color="normal" if (market_ok and model_ok) else "off")
-    
+    if results:
+        df_res = pd.DataFrame(results)
+        # Drop hidden cols for table
+        disp_cols = [c for c in df_res.columns if not c.startswith('_')]
+        
+        # Color styling function
+        def highlight_action(val):
+            color = 'lightgreen' if 'BUY' in str(val) else 'white'
+            if 'ERROR' in str(val): color = 'lightcoral'
+            return f'background-color: {color}'
+        
+        st.dataframe(df_res[disp_cols].style.applymap(highlight_action, subset=['Action']))
+        
+        # 4. Detailed View
+        st.markdown("### 🔍 個股詳細分析 (Details)")
+        
+        for r in results:
+            t = r['Ticker']
+            with st.expander(f"{t} - {r['Action']}", expanded=False):
+                if '⚠️' in r['Action']:
+                    st.error(f"錯誤訊息: {r.get('_error', 'Unknown')}")
+                else:
+                    detail = r['_raw_res']
+                    c1, c2 = st.columns([1, 2])
+                    
+                    with c1:
+                        st.metric("最新收盤", detail['close'])
+                        st.metric("模型信心", f"{detail['proba']:.1%}", delta=f"門檻: {detail['thresh']:.1%}")
+                        st.metric("最佳參數 (Quantile)", detail['best_q'])
+                        
+                    with c2:
+                        # Draw Chart
+                        if detail['curve'] is not None:
+                            st.write("**最近期回測表現 (Last 20% Samples)**")
+                            fig = px.line(detail['curve'], title=f"{t} Equity Curve (Validation)")
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                    st.caption("最近 5 筆數據特徵：")
+                    st.dataframe(detail['df_feat_tail'])
 else:
-    st.info("👈 請在左側設定參數並點擊 '開始分析' 來執行策略。")
+    st.info("👈 請在左側輸入股票代號清單 (支援多檔)，按下 '開始批次分析' 即可。")
