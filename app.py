@@ -35,6 +35,12 @@ input_tickers = st.sidebar.text_area(
     help="例如：\n2330.TW\nNVDA\nAAPL\n(若有上傳 Excel，將優先使用 Excel 內容)"
 )
 
+if st.sidebar.button("🧹 清除快取 (Clear Cache)"):
+    st.cache_data.clear()
+    st.sidebar.success("快取已清除！請重新執行分析。")
+
+st.sidebar.caption(f"yfinance version: {yf.__version__}")
+
 YEARS_BACK = st.sidebar.slider("回測年數", min_value=1, max_value=5, value=3)
 
 # 進階參數區
@@ -198,8 +204,10 @@ def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
     try:
         # 1. Download Stock
         df_stock = download_stock_data(ticker, start_date, end_date)
-        if df_stock is None or len(df_stock) < 60:
-            return {"status": "error", "msg": "No Data or too short"}
+        if df_stock is None:
+            return {"status": "error", "msg": f"無資料 (No Data) - {ticker}"}
+        if len(df_stock) < 60:
+            return {"status": "error", "msg": f"資料不足 ({len(df_stock)}筆) - {ticker}"}
             
         # 2. FE
         df_feat, features = feature_engineering(df_stock, df_macro)
