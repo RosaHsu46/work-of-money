@@ -46,7 +46,7 @@ def download_data(ticker, years):
         if isinstance(df_target.columns, pd.MultiIndex):
             df_target.columns = df_target.columns.get_level_values(0)
             
-        tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX']
+        tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
         df_macro = yf.download(tickers_macro, start=start_date, end=end_date, auto_adjust=True)
         if isinstance(df_macro.columns, pd.MultiIndex):
             df_macro_close = df_macro['Close'].copy()
@@ -57,7 +57,14 @@ def download_data(ticker, years):
         df = df_target[['Close', 'Volume']].join(df_macro_close, how='left')
         df.ffill(inplace=True)
         df.dropna(inplace=True)
-        df.rename(columns={'^VIX': 'VIX', 'DX-Y.NYB': 'DXY', '^TNX': 'US_10Y'}, inplace=True)
+        df.rename(columns={
+            '^VIX': 'VIX', 
+            'DX-Y.NYB': 'DXY', 
+            '^TNX': 'US_10Y',
+            '^SOX': 'SOX',
+            '^GSPC': 'SP500',
+            '^TWII': 'TWII'
+        }, inplace=True)
         
     return df
 
@@ -82,6 +89,9 @@ def feature_engineering(df):
     df['VIX_Chg_3d'] = df['VIX'].pct_change(3)
     df['DXY_Chg'] = df['DXY'].pct_change()
     df['US10Y_Chg'] = df['US_10Y'].pct_change()
+    df['SOX_Chg'] = df['SOX'].pct_change()
+    df['SP500_Chg'] = df['SP500'].pct_change()
+    df['TWII_Chg'] = df['TWII'].pct_change()
 
     # Target Logic
     # Backtest uses this
@@ -91,7 +101,13 @@ def feature_engineering(df):
     df['Target'] = (df['Return_3d'] > 0.003).astype(int)
 
     # Shift Features
-    features = ['SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 'VIX', 'VIX_Chg', 'VIX_Chg_3d', 'DXY', 'DXY_Chg', 'US_10Y', 'US10Y_Chg']
+    features = [
+        'SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 
+        'VIX', 'VIX_Chg', 'VIX_Chg_3d', 
+        'DXY', 'DXY_Chg', 
+        'US_10Y', 'US10Y_Chg',
+        'SOX_Chg', 'SP500_Chg', 'TWII_Chg'
+    ]
     for c in features:
         df[c] = df[c].shift(1)
         
