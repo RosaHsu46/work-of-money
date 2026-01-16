@@ -6,6 +6,8 @@ import numpy as np
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+import feedparser
+import urllib.parse
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import HistGradientBoostingClassifier
 
@@ -73,6 +75,30 @@ def download_macro_data(years):
     }, inplace=True)
     
     return df_macro_close, start_date, end_date
+
+@st.cache_data(ttl=600)  # News cache shorter (10 min)
+def get_stock_news(ticker):
+    """取得個股相關 Google News"""
+    try:
+        # 清理代號 (e.g. 2330.TW -> 2330) 或是直接用 "2330.TW stock"
+        # 搜尋關鍵字："{Ticker} stock"
+        query = f"{ticker} stock"
+        encoded_query = urllib.parse.quote(query)
+        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        
+        feed = feedparser.parse(rss_url)
+        
+        news_items = []
+        for entry in feed.entries[:5]:  # Top 5 news
+            news_items.append({
+                "title": entry.title,
+                "link": entry.link,
+                "published": entry.published or ""
+            })
+            
+        return news_items
+    except Exception as e:
+        return []
 
 @st.cache_data(ttl=3600)
 def download_stock_data(ticker, start_date, end_date):
@@ -374,22 +400,36 @@ if run_btn:
                 if '⚠️' in r['Action']:
                     st.error(f"錯誤訊息: {r.get('_error', 'Unknown')}")
                 else:
-                    detail = r['_raw_res']
-                    c1, c2 = st.columns([1, 2])
+                    # Tabs for Analysis vs News
+                    tab1, tab2 = st.tabs(["📊 數據分析", "🗞️ 相關新聞"])
                     
-                    with c1:
-                        st.metric("最新收盤", detail['close'])
-                        st.metric("模型信心", f"{detail['proba']:.1%}", delta=f"門檻: {detail['thresh']:.1%}")
-                        st.metric("最佳參數 (Quantile)", detail['best_q'])
+                    detail = r['_raw_res']
+                    
+                    with tab1:
+                        c1, c2 = st.columns([1, 2])
                         
-                    with c2:
-                        # Draw Chart
-                        if detail['curve'] is not None:
-                            st.write("**最近期回測表現 (Last 20% Samples)**")
-                            fig = px.line(detail['curve'], title=f"{t} Equity Curve (Validation)")
-                            st.plotly_chart(fig, use_container_width=True)
+                        with c1:
+                            st.metric("最新收盤", detail['close'])
+                            st.metric("模型信心", f"{detail['proba']:.1%}", delta=f"門檻: {detail['thresh']:.1%}")
+                            st.metric("最佳參數 (Quantile)", detail['best_q'])
                             
-                    st.caption("最近 5 筆數據特徵：")
-                    st.dataframe(detail['df_feat_tail'])
+                        with c2:
+                            # Draw Chart
+                            if detail['curve'] is not None:
+                                st.write("**最近期回測表現 (Last 20% Samples)**")
+                                fig = px.line(detail['curve'], title=f"{t} Equity Curve (Validation)")
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                        st.caption("最近 5 筆數據特徵：")
+                        st.dataframe(detail['df_feat_tail'])
+
+                    with tab2:
+                        st.markdown(f"**{t} 最新相關新聞 (Google News)**")
+                        news_list = get_stock_news(t)
+                        if news_list:
+                            for n in news_list:
+                                st.markdown(f"- [{n['title']}]({n['link']}) \n  <small style='color:gray'>{n['published']}</small>", unsafe_allow_html=True)
+                        else:
+                            st.info("暫無相關新聞或連線逾時。")
 else:
     st.info("👈 請在左側輸入股票代號清單 (支援多檔)，按下 '開始批次分析' 即可。")
