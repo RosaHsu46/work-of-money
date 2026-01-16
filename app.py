@@ -64,16 +64,22 @@ def download_macro_data(years):
     
     df_macro_close.index = pd.to_datetime(df_macro_close.index).tz_localize(None)
     
-    # Rename
-    df_macro_close.rename(columns={
+    # Rename mapping
+    rename_map = {
         '^VIX': 'VIX', 
         'DX-Y.NYB': 'DXY', 
         '^TNX': 'US_10Y',
         '^SOX': 'SOX',
         '^GSPC': 'SP500',
         '^TWII': 'TWII'
-    }, inplace=True)
+    }
+    df_macro_close.rename(columns=rename_map, inplace=True)
     
+    # Ensure all expected columns exist (fill missing with NaN to avoid KeyError)
+    for target_col in rename_map.values():
+        if target_col not in df_macro_close.columns:
+            df_macro_close[target_col] = np.nan
+            
     return df_macro_close, start_date, end_date
 
 @st.cache_data(ttl=600)  # News cache shorter (10 min)
@@ -132,14 +138,19 @@ def feature_engineering(df_stock, df_macro):
     
     df['Mom_3d'] = df['Close'].pct_change(3)
 
-    # Macro Features
-    df['VIX_Chg'] = df['VIX'].pct_change()
-    df['VIX_Chg_3d'] = df['VIX'].pct_change(3)
-    df['DXY_Chg'] = df['DXY'].pct_change()
-    df['US10Y_Chg'] = df['US_10Y'].pct_change()
-    df['SOX_Chg'] = df['SOX'].pct_change()
-    df['SP500_Chg'] = df['SP500'].pct_change()
-    df['TWII_Chg'] = df['TWII'].pct_change()
+    df['Mom_3d'] = df['Close'].pct_change(3)
+
+    # Macro Features (Safe Compute)
+    if 'VIX' in df.columns:
+        df['VIX_Chg'] = df['VIX'].pct_change()
+        df['VIX_Chg_3d'] = df['VIX'].pct_change(3)
+        df['VIX_med60'] = df['VIX'].rolling(60).median().shift(1)
+    
+    if 'DXY' in df.columns: df['DXY_Chg'] = df['DXY'].pct_change()
+    if 'US_10Y' in df.columns: df['US10Y_Chg'] = df['US_10Y'].pct_change()
+    if 'SOX' in df.columns: df['SOX_Chg'] = df['SOX'].pct_change()
+    if 'SP500' in df.columns: df['SP500_Chg'] = df['SP500'].pct_change()
+    if 'TWII' in df.columns: df['TWII_Chg'] = df['TWII'].pct_change()
 
     # Target Logic
     # Backtest uses this (Return tomorrow)
@@ -148,21 +159,22 @@ def feature_engineering(df_stock, df_macro):
     df['Return_3d'] = df['Close'].shift(-3) / df['Close'] - 1
     df['Target'] = (df['Return_3d'] > 0.003).astype(int)
 
-    # Shift Features (Lag 1)
-    features = [
-        'SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 
+    # Base Features
+    base_features = ['SMA_5', 'RSI_14', 'Mom_3d', 'Volume']
+    macro_candidates = [
         'VIX', 'VIX_Chg', 'VIX_Chg_3d', 
         'DXY', 'DXY_Chg', 
         'US_10Y', 'US10Y_Chg',
         'SOX_Chg', 'SP500_Chg', 'TWII_Chg'
     ]
+    
+    # Filter available features
+    features = base_features + [c for c in macro_candidates if c in df.columns]
+    
     for c in features:
         df[c] = df[c].shift(1)
         
     df.dropna(inplace=True)
-    
-    # Regime
-    df['VIX_med60'] = df['VIX'].rolling(60).median().shift(1)
     
     return df, features
 
@@ -256,9 +268,13 @@ def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
         current_thresh = pd.Series(proba_history).rolling(252).quantile(best_q).iloc[-1]
         
         # Final Decision
-        latest_vix = df_feat['VIX'].iloc[-1]
-        vix_med = df_feat['VIX_med60'].iloc[-1]
-        market_ok = latest_vix < vix_med
+        market_ok = True
+        if 'VIX' in df_feat.columns and 'VIX_med60' in df_feat.columns:
+            latest_vix = df_feat['VIX'].iloc[-1]
+            vix_med = df_feat['VIX_med60'].iloc[-1]
+            if not pd.isna(latest_vix) and not pd.isna(vix_med):
+                market_ok = latest_vix < vix_med
+        
         model_ok = latest_proba >= current_thresh
         
         action = "✅ BUY" if (market_ok and model_ok) else "🛑 WAIT"
