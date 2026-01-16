@@ -27,13 +27,65 @@ st.sidebar.header("⚙️ 參數設定")
 # 新增：Excel 上傳功能
 uploaded_file = st.sidebar.file_uploader("📁 上傳持有清單 (Excel)", type=["xlsx", "xls"])
 
-default_tickers = "2330.TW\n2317.TW\n2454.TW"
+# Initialize session state for tickers
+if 'tickers_text' not in st.session_state:
+    st.session_state['tickers_text'] = "2330.TW\n2317.TW\n2454.TW"
+if 'last_uploaded_file' not in st.session_state:
+    st.session_state['last_uploaded_file'] = None
+
+# Logic: Process file ONLY if it is new
+if uploaded_file is not None and uploaded_file != st.session_state['last_uploaded_file']:
+    try:
+        df_upload = pd.read_excel(uploaded_file)
+        # 智慧偵測欄位
+        possible_cols = ['股票代號', 'Ticker', 'Symbol', 'Code', 'Stock', '股號', '代號']
+        target_col = None
+        cols_clean = [str(c).strip() for c in df_upload.columns]
+        
+        for p in possible_cols:
+            matches = [i for i, c in enumerate(cols_clean) if c.lower() == p.lower()]
+            if matches:
+                target_col = df_upload.columns[matches[0]]
+                break
+        
+        raw_list = []
+        if target_col:
+            st.sidebar.success(f"讀取成功！欄位：{target_col}")
+            raw_list = df_upload[target_col].dropna().tolist()
+        else:
+            st.sidebar.warning("未偵測到代號欄位，預設使用第一欄")
+            raw_list = df_upload.iloc[:, 0].astype(str).tolist()
+            
+        # Clean and Format
+        cleaned = []
+        for item in raw_list:
+            s = str(item).strip()
+            if s.isdigit() and len(s) < 4: s = s.zfill(4)
+            if not s.upper().endswith('.TW') and not s.upper().endswith('.TWO'): s += '.TW'
+            cleaned.append(s)
+            
+        # Update Session State
+        unique_tickers = list(dict.fromkeys(cleaned))
+        st.session_state['tickers_text'] = "\n".join(unique_tickers)
+        st.session_state['last_uploaded_file'] = uploaded_file
+        st.sidebar.info(f"已匯入 {len(unique_tickers)} 檔股票至下方列表中。")
+        
+    except Exception as e:
+        st.sidebar.error(f"解析失敗: {e}")
+
 input_tickers = st.sidebar.text_area(
-    "股票代號清單 (一行一個或逗號分隔)", 
-    value=default_tickers,
+    "股票代號清單 (可手動修改)", 
+    value=st.session_state['tickers_text'],
     height=150,
-    help="例如：\n2330.TW\nNVDA\nAAPL\n(若有上傳 Excel，將優先使用 Excel 內容)"
+    key='tickers_input_widget', # Unique key
+    help="上傳 Excel 後會自動填入此處，您也可以手動編輯。"
 )
+
+# Update session state if user edits text area manually
+if input_tickers != st.session_state['tickers_text']:
+     st.session_state['tickers_text'] = input_tickers
+
+
 
 if st.sidebar.button("🧹 清除快取 (Clear Cache)"):
     st.cache_data.clear()
@@ -61,7 +113,8 @@ def download_macro_data(years):
     start_date = (today - timedelta(days=365*years)).strftime("%Y-%m-%d")
     end_date = today.strftime("%Y-%m-%d")
     
-    tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
+    # Critical Global Tech Trend Indicators: NVDA (AI), MU (Memory)
+    tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII', 'NVDA', 'MU']
     df_macro = yf.download(tickers_macro, start=start_date, end=end_date, auto_adjust=True)
     
     # Handle yfinance recent changes or single-ticker return result
@@ -69,17 +122,13 @@ def download_macro_data(years):
         try:
             df_macro_close = df_macro['Close'].copy()
         except KeyError:
-             # Fallback if 'Close' not found (e.g. only one level)
              df_macro_close = df_macro.copy()
     else:
-        # If single index, it might be (Date, Open, Close...) for ONE ticker, OR just Close cols?
-        # Check if contains 'Close' column
         if 'Close' in df_macro.columns:
              df_macro_close = df_macro['Close'].copy()
         else:
              df_macro_close = df_macro.copy()
              
-    # Force DataFrame if Series (happens if only 1 ticker downloaded)
     if isinstance(df_macro_close, pd.Series):
         df_macro_close = df_macro_close.to_frame()
         
@@ -92,7 +141,9 @@ def download_macro_data(years):
         '^TNX': 'US_10Y',
         '^SOX': 'SOX',
         '^GSPC': 'SP500',
-        '^TWII': 'TWII'
+        '^TWII': 'TWII',
+        'NVDA': 'NVDA',
+        'MU': 'MU'
     }
     df_macro_close.rename(columns=rename_map, inplace=True)
     
@@ -172,6 +223,10 @@ def feature_engineering(df_stock, df_macro):
     if 'SOX' in df.columns: df['SOX_Chg'] = df['SOX'].pct_change()
     if 'SP500' in df.columns: df['SP500_Chg'] = df['SP500'].pct_change()
     if 'TWII' in df.columns: df['TWII_Chg'] = df['TWII'].pct_change()
+    
+    # AI/Memory Trend Features
+    if 'NVDA' in df.columns: df['NVDA_Chg'] = df['NVDA'].pct_change()
+    if 'MU' in df.columns: df['MU_Chg'] = df['MU'].pct_change()
 
     # Target Logic
     # Backtest uses this (Return tomorrow)
@@ -186,7 +241,8 @@ def feature_engineering(df_stock, df_macro):
         'VIX', 'VIX_Chg', 'VIX_Chg_3d', 
         'DXY', 'DXY_Chg', 
         'US_10Y', 'US10Y_Chg',
-        'SOX_Chg', 'SP500_Chg', 'TWII_Chg'
+        'SOX_Chg', 'SP500_Chg', 'TWII_Chg',
+        'NVDA_Chg', 'MU_Chg' # Added new features
     ]
     
     # Filter available features
@@ -324,74 +380,11 @@ def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
 # Main Execution
 # --------------------------
 if run_btn:
-    raw_tickers = []
-    
-    # 優先處理 Excel 上傳
-    if uploaded_file is not None:
-        try:
-            df_upload = pd.read_excel(uploaded_file)
-            
-            # 智慧偵測欄位
-            # 優先找 "股票代號" (User Screenshot)
-            possible_cols = ['股票代號', 'Ticker', 'Symbol', 'Code', 'Stock', '股號', '代號']
-            target_col = None
-            
-            # Case-insensitive & Strip search
-            cols_clean = [str(c).strip() for c in df_upload.columns]
-            
-            for p in possible_cols:
-                # Find exact match ignore case
-                matches = [i for i, c in enumerate(cols_clean) if c.lower() == p.lower()]
-                if matches:
-                    target_col = df_upload.columns[matches[0]]
-                    break
-            
-            if target_col:
-                st.sidebar.success(f"✅ 讀取欄位：{target_col}")
-                raw_list = df_upload[target_col].dropna().tolist()
-                
-                cleaned_tickers = []
-                for item in raw_list:
-                    # 轉字串並去除空白
-                    s = str(item).strip()
-                    # 處理 Excel 數字格式 (e.g. 50 -> 0050)
-                    # 如果是純數字且長度 < 4，自動補0
-                    if s.isdigit() and len(s) < 4:
-                        s = s.zfill(4)
-                    
-                    # 處理後綴
-                    if not s.upper().endswith('.TW') and not s.upper().endswith('.TWO'):
-                        # 假設大部分是台股，補上 .TW
-                        # (若原本就是 2330.TW 則不動)
-                        s += '.TW'
-                        
-                    cleaned_tickers.append(s)
-                
-                raw_tickers = list(dict.fromkeys(cleaned_tickers)) # Remove duplicates
-                st.sidebar.info(f"解析出 {len(raw_tickers)} 擋股票")
-                
-            else:
-                # Fallback to first column
-                st.sidebar.warning("⚠️ 找不到 '股票代號' 相關欄位，嘗試使用第一欄。")
-                raw_list = df_upload.iloc[:, 0].astype(str).tolist()
-                # Apply same cleaning
-                cleaned_tickers = []
-                for item in raw_list:
-                    s = str(item).strip()
-                    if s.isdigit() and len(s) < 4: s = s.zfill(4)
-                    if not s.upper().endswith('.TW') and not s.upper().endswith('.TWO'): s += '.TW'
-                    cleaned_tickers.append(s)
-                raw_tickers = list(dict.fromkeys(cleaned_tickers))
-
-        except Exception as e:
-            st.error(f"Excel 讀取失敗: {e}")
-            st.stop()
-    else:
-        # 使用 Text Area
-        raw_tickers = [t.strip() for t in input_tickers.replace(',', '\n').split('\n') if t.strip()]
+    # 3. 使用 Text Area 的內容 (現在 Excel 已經填進去了)
+    raw_tickers = [t.strip() for t in input_tickers.replace(',', '\n').split('\n') if t.strip()]
     
     if not raw_tickers:
-        st.error("請輸入至少一支股票代號，或上傳 Excel 檔案。")
+        st.error("請輸入至少一支股票代號")
         st.stop()
         
     st.write(f"📊 準備分析 {len(raw_tickers)} 檔股票...")
@@ -505,7 +498,15 @@ if run_btn:
                         news_list = get_stock_news(t)
                         if news_list:
                             for n in news_list:
-                                st.markdown(f"- [{n['title']}]({n['link']}) \n  <small style='color:gray'>{n['published']}</small>", unsafe_allow_html=True)
+                                title = n['title']
+                                # Keyword Highlighting
+                                keywords = ['AI', 'Nvidia', 'Memory', 'DRAM', 'Server', 'Chip', 'Semiconductor', '台積電', '輝達', '記憶體']
+                                for k in keywords:
+                                    if k.lower() in title.lower():
+                                        title = f"🔥 {title}"
+                                        break
+                                
+                                st.markdown(f"- [{title}]({n['link']}) \n  <small style='color:gray'>{n['published']}</small>", unsafe_allow_html=True)
                         else:
                             st.info("暫無相關新聞或連線逾時。")
 else:
