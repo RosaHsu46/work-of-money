@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 # ==========================================
-# MVP 2.2：2330.TW + VIX/DXY/US10Y
+# MVP 2.3：2330.TW + VIX/DXY/US10Y/SOX/SP500/TWII
 # - 不用 pandas_ta
 # - 特徵全部 lag=1（避免資訊洩漏）
 # - Target：Return_3d > 0.3% (3日累積報酬)
@@ -66,7 +66,7 @@ if isinstance(df_tw.columns, pd.MultiIndex):
 df_tw = df_tw[['Close', 'Volume']].copy()
 df_tw.index = pd.to_datetime(df_tw.index).tz_localize(None)
 
-tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX']
+tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
 df_macro = yf.download(tickers_macro, start=START_DATE, end=END_DATE, auto_adjust=True)
 
 # yfinance 多標的會變成多層欄位
@@ -87,7 +87,15 @@ df = df_tw.join(df_macro_close, how='left')
 df.ffill(inplace=True)
 df.dropna(inplace=True)
 
-df.rename(columns={'^VIX': 'VIX', 'DX-Y.NYB': 'DXY', '^TNX': 'US_10Y'}, inplace=True)
+df.rename(columns={
+    '^VIX': 'VIX', 
+    'DX-Y.NYB': 'DXY', 
+    '^TNX': 'US_10Y',
+    '^SOX': 'SOX',
+    '^GSPC': 'SP500',
+    '^TWII': 'TWII'
+}, inplace=True)
+
 
 # --------------------------
 # 3) 特徵工程
@@ -102,6 +110,10 @@ df['VIX_Chg'] = df['VIX'].pct_change()
 df['VIX_Chg_3d'] = df['VIX'].pct_change(3)  # [NEW] 3日 VIX 變化
 df['DXY_Chg'] = df['DXY'].pct_change()
 df['US10Y_Chg'] = df['US_10Y'].pct_change()
+df['SOX_Chg'] = df['SOX'].pct_change()
+df['SP500_Chg'] = df['SP500'].pct_change()
+df['TWII_Chg'] = df['TWII'].pct_change()
+
 
 # --------------------------
 # 4) Target：未來 3 日累積報酬 > 0.3%
@@ -118,7 +130,13 @@ df['Target'] = (df['Return_3d'] > threshold).astype(int)
 # --------------------------
 # 5) 🔥避免資訊洩漏：所有特徵 lag 1 天
 # --------------------------
-features = ['SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 'VIX', 'VIX_Chg', 'VIX_Chg_3d', 'DXY', 'DXY_Chg', 'US_10Y', 'US10Y_Chg']
+features = [
+    'SMA_5', 'RSI_14', 'Mom_3d', 'Volume', 
+    'VIX', 'VIX_Chg', 'VIX_Chg_3d', 
+    'DXY', 'DXY_Chg', 
+    'US_10Y', 'US10Y_Chg',
+    'SOX_Chg', 'SP500_Chg', 'TWII_Chg'
+]
 for c in features:
     df[c] = df[c].shift(1)
 
