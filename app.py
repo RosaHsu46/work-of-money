@@ -293,26 +293,57 @@ if run_btn:
             df_upload = pd.read_excel(uploaded_file)
             
             # 智慧偵測欄位
-            possible_cols = ['Ticker', 'Symbol', 'Code', 'Stock', '股號', '股票代號', '代號']
+            # 優先找 "股票代號" (User Screenshot)
+            possible_cols = ['股票代號', 'Ticker', 'Symbol', 'Code', 'Stock', '股號', '代號']
             target_col = None
             
-            # Case-insensitive search
-            cols_lower = [c.lower() for c in df_upload.columns]
+            # Case-insensitive & Strip search
+            cols_clean = [str(c).strip() for c in df_upload.columns]
             
             for p in possible_cols:
-                if p.lower() in cols_lower:
-                    # Find exact match in original cols
-                    target_col = df_upload.columns[cols_lower.index(p.lower())]
+                # Find exact match ignore case
+                matches = [i for i, c in enumerate(cols_clean) if c.lower() == p.lower()]
+                if matches:
+                    target_col = df_upload.columns[matches[0]]
                     break
             
             if target_col:
-                st.sidebar.success(f"✅ 成功讀取 Excel 欄位：{target_col}")
-                raw_tickers = df_upload[target_col].astype(str).tolist()
+                st.sidebar.success(f"✅ 讀取欄位：{target_col}")
+                raw_list = df_upload[target_col].dropna().tolist()
+                
+                cleaned_tickers = []
+                for item in raw_list:
+                    # 轉字串並去除空白
+                    s = str(item).strip()
+                    # 處理 Excel 數字格式 (e.g. 50 -> 0050)
+                    # 如果是純數字且長度 < 4，自動補0
+                    if s.isdigit() and len(s) < 4:
+                        s = s.zfill(4)
+                    
+                    # 處理後綴
+                    if not s.upper().endswith('.TW') and not s.upper().endswith('.TWO'):
+                        # 假設大部分是台股，補上 .TW
+                        # (若原本就是 2330.TW 則不動)
+                        s += '.TW'
+                        
+                    cleaned_tickers.append(s)
+                
+                raw_tickers = list(dict.fromkeys(cleaned_tickers)) # Remove duplicates
+                st.sidebar.info(f"解析出 {len(raw_tickers)} 擋股票")
+                
             else:
                 # Fallback to first column
-                st.sidebar.warning("⚠️ 找不到 'Ticker' 或 '股票代號' 欄位，預設使用第一欄。")
-                raw_tickers = df_upload.iloc[:, 0].astype(str).tolist()
-                
+                st.sidebar.warning("⚠️ 找不到 '股票代號' 相關欄位，嘗試使用第一欄。")
+                raw_list = df_upload.iloc[:, 0].astype(str).tolist()
+                # Apply same cleaning
+                cleaned_tickers = []
+                for item in raw_list:
+                    s = str(item).strip()
+                    if s.isdigit() and len(s) < 4: s = s.zfill(4)
+                    if not s.upper().endswith('.TW') and not s.upper().endswith('.TWO'): s += '.TW'
+                    cleaned_tickers.append(s)
+                raw_tickers = list(dict.fromkeys(cleaned_tickers))
+
         except Exception as e:
             st.error(f"Excel 讀取失敗: {e}")
             st.stop()
