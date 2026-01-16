@@ -21,12 +21,15 @@ st.markdown("### 2-Stage Gate: VIX Regime + Dynamic Quantile Model")
 st.sidebar.header("⚙️ 參數設定")
 
 # 修改：改成 Text Area 支援多檔股票
+# 新增：Excel 上傳功能
+uploaded_file = st.sidebar.file_uploader("📁 上傳持有清單 (Excel)", type=["xlsx", "xls"])
+
 default_tickers = "2330.TW\n2317.TW\n2454.TW"
 input_tickers = st.sidebar.text_area(
     "股票代號清單 (一行一個或逗號分隔)", 
     value=default_tickers,
     height=150,
-    help="例如：\n2330.TW\nNVDA\nAAPL"
+    help="例如：\n2330.TW\nNVDA\nAAPL\n(若有上傳 Excel，將優先使用 Excel 內容)"
 )
 
 YEARS_BACK = st.sidebar.slider("回測年數", min_value=1, max_value=5, value=3)
@@ -256,13 +259,47 @@ def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
 # Main Execution
 # --------------------------
 if run_btn:
-    # Parse Tickers
-    raw_tickers = [t.strip() for t in input_tickers.replace(',', '\n').split('\n') if t.strip()]
+    raw_tickers = []
+    
+    # 優先處理 Excel 上傳
+    if uploaded_file is not None:
+        try:
+            df_upload = pd.read_excel(uploaded_file)
+            
+            # 智慧偵測欄位
+            possible_cols = ['Ticker', 'Symbol', 'Code', 'Stock', '股號', '股票代號', '代號']
+            target_col = None
+            
+            # Case-insensitive search
+            cols_lower = [c.lower() for c in df_upload.columns]
+            
+            for p in possible_cols:
+                if p.lower() in cols_lower:
+                    # Find exact match in original cols
+                    target_col = df_upload.columns[cols_lower.index(p.lower())]
+                    break
+            
+            if target_col:
+                st.sidebar.success(f"✅ 成功讀取 Excel 欄位：{target_col}")
+                raw_tickers = df_upload[target_col].astype(str).tolist()
+            else:
+                # Fallback to first column
+                st.sidebar.warning("⚠️ 找不到 'Ticker' 或 '股票代號' 欄位，預設使用第一欄。")
+                raw_tickers = df_upload.iloc[:, 0].astype(str).tolist()
+                
+        except Exception as e:
+            st.error(f"Excel 讀取失敗: {e}")
+            st.stop()
+    else:
+        # 使用 Text Area
+        raw_tickers = [t.strip() for t in input_tickers.replace(',', '\n').split('\n') if t.strip()]
     
     if not raw_tickers:
-        st.error("請輸入至少一支股票代號")
+        st.error("請輸入至少一支股票代號，或上傳 Excel 檔案。")
         st.stop()
         
+    st.write(f"📊 準備分析 {len(raw_tickers)} 檔股票...")
+    
     # 1. Download Macro (Once)
     st.info("📥 下載宏觀數據中 (Macro Data)...")
     try:
