@@ -3,6 +3,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import traceback
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -57,11 +58,25 @@ def download_macro_data(years):
     tickers_macro = ['^VIX', 'DX-Y.NYB', '^TNX', '^SOX', '^GSPC', '^TWII']
     df_macro = yf.download(tickers_macro, start=start_date, end=end_date, auto_adjust=True)
     
+    # Handle yfinance recent changes or single-ticker return result
     if isinstance(df_macro.columns, pd.MultiIndex):
-        df_macro_close = df_macro['Close'].copy()
+        try:
+            df_macro_close = df_macro['Close'].copy()
+        except KeyError:
+             # Fallback if 'Close' not found (e.g. only one level)
+             df_macro_close = df_macro.copy()
     else:
-        df_macro_close = df_macro.copy()
-    
+        # If single index, it might be (Date, Open, Close...) for ONE ticker, OR just Close cols?
+        # Check if contains 'Close' column
+        if 'Close' in df_macro.columns:
+             df_macro_close = df_macro['Close'].copy()
+        else:
+             df_macro_close = df_macro.copy()
+             
+    # Force DataFrame if Series (happens if only 1 ticker downloaded)
+    if isinstance(df_macro_close, pd.Series):
+        df_macro_close = df_macro_close.to_frame()
+        
     df_macro_close.index = pd.to_datetime(df_macro_close.index).tz_localize(None)
     
     # Rename mapping
@@ -295,7 +310,7 @@ def run_analysis_for_ticker(ticker, df_macro, start_date, end_date):
         }
         
     except Exception as e:
-        return {"status": "error", "msg": str(e)}
+        return {"status": "error", "msg": str(e), "traceback": traceback.format_exc()}
 
 # --------------------------
 # Main Execution
@@ -407,15 +422,20 @@ if run_btn:
             })
         else:
             # Error row
+            error_msg = res['msg']
+            # Simplify error for table
+            short_err = (error_msg[:30] + '..') if len(error_msg) > 30 else error_msg
+            
             results.append({
                 "Ticker": t,
-                "Action": "⚠️ ERROR",
+                "Action": f"❌ {short_err}",
                 "Confidence": "-",
                 "Threshold": "-",
                 "Market(VIX)": "-",
                 "Backtest(Last20%)": "-",
                 "Close": "-",
-                "_error": res['msg']
+                "_error": res['msg'],
+                "_traceback": res.get('traceback', '')
             })
             
     progress_bar.progress(1.0)
@@ -423,7 +443,7 @@ if run_btn:
     
     # 3. Summary Dashboard
     st.markdown("---")
-    st.subheader("� 投資組合總體檢 (Portfolio Summary)")
+    st.subheader("📊 投資組合總體檢 (Portfolio Summary)")
     
     if results:
         df_res = pd.DataFrame(results)
@@ -433,7 +453,7 @@ if run_btn:
         # Color styling function
         def highlight_action(val):
             color = 'lightgreen' if 'BUY' in str(val) else 'white'
-            if 'ERROR' in str(val): color = 'lightcoral'
+            if '❌' in str(val) or 'ERROR' in str(val): color = 'lightcoral'
             return f'background-color: {color}'
         
         st.dataframe(df_res[disp_cols].style.applymap(highlight_action, subset=['Action']))
@@ -444,8 +464,10 @@ if run_btn:
         for r in results:
             t = r['Ticker']
             with st.expander(f"{t} - {r['Action']}", expanded=False):
-                if '⚠️' in r['Action']:
-                    st.error(f"錯誤訊息: {r.get('_error', 'Unknown')}")
+                if '❌' in r['Action'] or 'ERROR' in r['Action']:
+                    st.error(f"錯誤原因: {r.get('_error', 'Unknown')}")
+                    if '_traceback' in r:
+                        st.code(r['_traceback'], language='python')
                 else:
                     # Tabs for Analysis vs News
                     tab1, tab2 = st.tabs(["📊 數據分析", "🗞️ 相關新聞"])
